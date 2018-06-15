@@ -1,0 +1,227 @@
+#!/usr/bin/env node
+/**
+ * This is Livery, a Nano PoW worker client.
+ */
+
+const fs = require('fs')
+const mqtt = require('mqtt')
+// const mqttRegex = require('mqtt-regex') // Used to parse out parameters from wildcard MQTT topics
+// const request = require('request')
+const extend = require('extend') // To merge objects
+const log = require('loglevel') // Logging lib
+const neodoc = require('neodoc') // For nice command line opts
+const pow = require('raiblocks-pow')
+
+// Parse out command line
+const args = neodoc.run(`
+Usage:
+  livery [--config=<path>]
+  paddle -h | --help | --version
+`, { optionsFirst: true, smartOptions: true })
+
+// Default config that is extended (merged) with CONFIG_FILE
+var CONFIG_FILE = 'livery.conf'
+if (args['--config']) {
+  CONFIG_FILE = args['--config']
+}
+
+// Published as retained message and shared by all programs connecting to canoed
+var sharedConfig
+
+// MQTT Client
+var mqttClient = null
+
+// Flag to indicate we have already subscribed to topics
+var subscribed = false
+
+// Id of worker
+var workerId
+
+// Read configuration
+function configure () {
+  // Read config file
+  if (fs.existsSync(CONFIG_FILE)) {
+    try {
+      config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))
+    } catch (e) {
+      log.error('Failed to parse config file: ' + CONFIG_FILE + e.message)
+      process.exit(1)
+    }
+  } else {
+    log.error('Missing config file: ' + CONFIG_FILE)
+    process.exit(1)
+  }
+  log.setLevel(config.logging.level)
+  workerId = config.mqtt.clientId
+  config.mqtt.options.will.topic = 'worker/' + workerId + '/unregister'
+  config.mqtt.options.will.payoad = config.meta
+}
+
+function handleLogging (message) {
+  log.debug('MQTT: ' + JSON.stringify(JSON.parse(message)))
+}
+
+// Connect to MQTT
+function connectMQTT (cb) {
+  mqttClient = mqtt.connect(config.mqtt.url, config.mqtt.options)
+  mqttClient.on('connect', function () {
+    log.info('Connected to MQTT server')
+    cb()
+  })
+
+  // Where all subscribed messages come in
+  mqttClient.on('message', function (topic, message) {
+    switch (topic) {
+      case 'sharedconfig':
+        return handleSharedConfig(message)
+      case 'request':
+        return handleRequest(message)
+      case 'abort':
+        return handleAbort(message)
+    }
+    if (logging) {
+      return handleLogging(message)
+    }
+    log.error('No handler for topic %s', topic)
+  })
+}
+
+function publishRegister (payload, cb) {
+  log.debug('Publish register: ' + JSON.stringify(payload))
+  mqttClient.publish('worker/' + workerId + '/register'  , JSON.stringify(payload), config.mqtt.register.opts, cb)
+}
+
+function publishWorking (payload, cb) {
+  log.debug('Publish working: ' + JSON.stringify(payload))
+  mqttClient.publish('worker/' + workerId + '/working'  , JSON.stringify(payload), config.mqtt.working.opts, cb)
+}
+
+function publishAnswer (payload, cb) {
+  log.debug('Publish answer: ' + JSON.stringify(payload))
+  mqttClient.publish('worker/' + workerId + '/answer'  , JSON.stringify(payload), config.mqtt.answer.opts, cb)
+}
+
+// Subscribe
+function subscribe () {
+  if (!subscribed) {
+    mqttClient.subscribe('worker/' + workerId + '/request')
+    mqttClient.subscribe('worker/' + workerId + '/abort')
+    log.debug('Subscribed')
+    // /+/ for wildcards
+    subscribed = true
+  }
+}
+
+function handleSharedConfig (message) {
+  sharedConfig = JSON.parse(message)
+  log.debug('Saved new sharedconfig: ' + JSON.stringify(sharedConfig))
+}
+
+function handleRequest (message) {
+  var req = JSON.parse(message)
+  log.debug('Request for work: ' + JSON.stringify(req))
+  publishWorking({}, function () {
+    log.debug('Working on ' + req.hash)
+    performWork(req, function (work) {
+      if (work) {
+        log.debug('Work done: ' + work)
+        publishAnswer({work: work}, function () {
+          log.debug('Work published')
+        })  
+      } else {
+        log.debug('Work failed')
+        publishAnswer({work: null}, function () {
+          log.debug('Failed work published')
+        })
+      }
+    })
+  })
+}
+
+function handleAbort (message) {
+  log.debug('Request to abort')
+  mqttClient.
+}
+
+function performWork(req, cb) {
+  var hash = req.hash
+  if (config.work.internal) {
+    if (config.work.threaded) {
+      pow.threaded(hash, (error, result) => {
+        if (error) {
+          log.error('Error making work: ' + error)
+          cb(null)
+        }
+        log.debug('Found work: ', result)
+        cb(work)
+      })
+    } else {
+      pow.async(hash, (error, result) => {
+        if (error) {
+          log.error('Error making work: ' + error)
+          cb(null)
+        }
+        log.debug('Found work: ', result)
+        cb(work)
+      })
+    }
+  } else {
+    log.debug('Missing implementation of performing work POST')
+  }
+}
+
+function handleSharedConfig (message) {
+  sharedConfig = JSON.parse(message)
+  log.debug('Saved new sharedconfig: ' + JSON.stringify(sharedConfig))
+}
+
+// Want to notify before shutting down
+function handleAppExit (options, err) {
+  if (err) {
+    log.error(err.stack)
+  }
+  if (options.cleanup) {
+    log.info('Cleaning up...')
+    if (mqttClient) {
+      mqttClient.end(true)
+    }
+  }
+  if (options.exit) {
+    log.info('Calling exit...')
+    process.exit()
+  }
+}
+
+function configureSignals () {
+  // Handle the different ways an application can shutdown
+  process.on('exit', handleAppExit.bind(null, {
+    cleanup: true
+  }))
+  process.on('SIGINT', handleAppExit.bind(null, {
+    exit: true
+  }))
+  process.on('uncaughtException', handleAppExit.bind(null, {
+    exit: true
+  }))
+}
+
+function connect() {
+  // Connect and register
+  connectMQTT(function () {
+    // Subscribe to our topics
+    subscribe()
+    // Register as worker
+    log.debug('Registering as ' + workerId)
+    publishRegister(config.meta, function (err) {
+      if (err) {
+        log.error(err)
+      }
+      process.exit(0)
+    })
+  })
+}
+
+// Let's start doing something
+configure()
+configureSignals()
+connect()

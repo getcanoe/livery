@@ -1,0 +1,41 @@
+{
+  "meta": { "description": "Worker at Svinninge", "email": "goran.krampe@gmail.com" },
+  "logging": {
+    "level": "debug"
+  },
+  "work": {
+    "internal": true,
+    "threaded": true
+    //  port: 8080
+  },
+  "mqtt": {
+    "url": 'wss://getcanoe.io/mqtt',
+    "options": {
+      "clientId": 'livery1',
+      "username": 'livery1',
+      "password": '1234',
+      "will": {
+        "qos": 2,
+        "retain": true
+      }
+    },
+    "working": {
+      "opts": {
+        "qos": 2,
+        "retain": false
+      }
+    },
+    "answer": {
+      "opts": {
+        "qos": 2,
+        "retain": false
+      }
+    },
+    "register": {
+      "opts": {
+        "qos": 2,
+        "retain": false
+      }
+    }
+  }
+}
